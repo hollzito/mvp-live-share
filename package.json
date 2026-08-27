@@ -1,0 +1,13 @@
+{
+  "name": "mvp-live-share",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MVP de transmissão de tela com código de sala, via WebRTC",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}
