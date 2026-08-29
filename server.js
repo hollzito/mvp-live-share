@@ -5,6 +5,7 @@ const WebSocket = require('ws');
 const path = require('path');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const fetch = require('node-fetch');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -22,6 +23,25 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // rooms: { code: { broadcaster: ws, viewers: Map(id -> ws) } }
 const rooms = new Map();
+
+// Manda o link do clipe pro canal do Discord configurado (se houver webhook definido)
+async function notifyDiscord(clipUrl, code) {
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: `🎬 Novo clipe salvo — sala **${code}**\n${clipUrl}`,
+      }),
+    });
+  } catch (err) {
+    console.error('Erro ao notificar o Discord:', err);
+  }
+}
+
 
 function generateCode() {
   let code;
@@ -60,6 +80,8 @@ app.post('/api/clips', upload.single('video'), async (req, res) => {
     });
 
     res.json({ url: result.secure_url, id: result.public_id, createdAt: result.created_at, code });
+
+    notifyDiscord(result.secure_url, code);
   } catch (err) {
     console.error('Erro ao enviar clipe para o Cloudinary:', err);
     res.status(500).json({ error: 'Falha ao salvar o clipe.' });
