@@ -13,8 +13,14 @@
     padding: 12px 20px; font-size: 18px; border: none; border-radius: 8px;
     background: #16a34a; color: white; cursor: pointer; margin-left: 8px;
   }
+  button:disabled { background: #86efac; cursor: default; }
   video { width: 100%; margin-top: 20px; border-radius: 8px; background: #000; }
   #errorMsg { color: #dc2626; margin-top: 10px; }
+  #clipBar { margin-top: 14px; display: none; }
+  #clipBar button { background: #7c3aed; font-size: 15px; padding: 10px 16px; }
+  #clipBar button:disabled { background: #c4b5fd; }
+  #clipStatus { margin-top: 8px; font-size: 14px; color: #475569; min-height: 20px; }
+  #clipStatus a { color: #7c3aed; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -27,21 +33,42 @@
 
   <video id="remoteVideo" autoplay playsinline controls style="display:none"></video>
 
+  <div id="clipBar">
+    <button id="clip30Btn">🎬 Clipar últimos 30s</button>
+    <button id="clip60Btn">🎬 Clipar últimos 60s</button>
+    <div id="clipStatus"></div>
+  </div>
+
+  <p><a href="/clips.html">Ver todos os clipes salvos →</a></p>
+
 <script>
 const joinBtn = document.getElementById('joinBtn');
 const codeInput = document.getElementById('codeInput');
 const errorMsg = document.getElementById('errorMsg');
 const remoteVideo = document.getElementById('remoteVideo');
 const joinBox = document.getElementById('joinBox');
+const clipBar = document.getElementById('clipBar');
+const clip30Btn = document.getElementById('clip30Btn');
+const clip60Btn = document.getElementById('clip60Btn');
+const clipStatus = document.getElementById('clipStatus');
 
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 let ws, pc;
+let currentCode = '';
+
+// --- Buffer contínuo para os clipes ---
+const CHUNK_MS = 1000;       // tamanho de cada pedaço gravado
+const MAX_BUFFER_SECONDS = 65; // mantemos só um pouco mais que o clipe máximo (60s)
+let recorder;
+let headerChunk = null;   // primeiro pedaço, contém o cabeçalho do vídeo (necessário sempre)
+let chunkBuffer = [];     // pedaços mais recentes (janela deslizante)
 
 codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinBtn.click(); });
 
 joinBtn.addEventListener('click', () => {
   const code = codeInput.value.trim().toUpperCase();
   if (!code) return;
+  currentCode = code;
   errorMsg.textContent = '';
 
   ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
@@ -80,6 +107,10 @@ function setupPeerConnection() {
 
   pc.ontrack = (event) => {
     remoteVideo.srcObject = event.streams[0];
+    remoteVideo.onloadedmetadata = () => {
+      // Espera um instante pra dar tempo da faixa de áudio chegar também
+      setTimeout(() => startRecordingBuffer(event.streams[0]), 800);
+    };
   };
 
   pc.onicecandidate = (event) => {
@@ -88,6 +119,69 @@ function setupPeerConnection() {
     }
   };
 }
+
+function startRecordingBuffer(stream) {
+  if (recorder) return; // já iniciado
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
+  } catch (e) {
+    console.warn('Gravação de clipes não suportada neste navegador:', e);
+    return;
+  }
+
+  recorder.ondataavailable = (event) => {
+    if (!event.data || event.data.size === 0) return;
+    if (!headerChunk) {
+      headerChunk = event.data; // primeiro pedaço = cabeçalho do vídeo
+      return;
+    }
+    chunkBuffer.push(event.data);
+    if (chunkBuffer.length > MAX_BUFFER_SECONDS) {
+      chunkBuffer.shift();
+    }
+  };
+
+  recorder.start(CHUNK_MS);
+  clipBar.style.display = 'block';
+}
+
+async function makeClip(seconds) {
+  if (!headerChunk || chunkBuffer.length === 0) {
+    clipStatus.textContent = 'Ainda não há vídeo suficiente gravado. Espere alguns segundos.';
+    return;
+  }
+
+  clip30Btn.disabled = true;
+  clip60Btn.disabled = true;
+  clipStatus.textContent = 'Preparando clipe...';
+
+  const wanted = chunkBuffer.slice(-seconds);
+  const blob = new Blob([headerChunk, ...wanted], { type: 'video/webm' });
+
+  const formData = new FormData();
+  formData.append('video', blob, `clipe-${currentCode}-${Date.now()}.webm`);
+  formData.append('code', currentCode);
+
+  try {
+    clipStatus.textContent = 'Enviando clipe...';
+    const res = await fetch('/api/clips', { method: 'POST', body: formData });
+    const data = await res.json();
+
+    if (!res.ok) {
+      clipStatus.textContent = 'Erro: ' + (data.error || 'não foi possível salvar o clipe.');
+    } else {
+      clipStatus.innerHTML = `Clipe salvo! <a href="${data.url}" target="_blank">Assistir</a> · <a href="/clips.html">Ver galeria</a>`;
+    }
+  } catch (err) {
+    clipStatus.textContent = 'Erro de conexão ao enviar o clipe.';
+  } finally {
+    clip30Btn.disabled = false;
+    clip60Btn.disabled = false;
+  }
+}
+
+clip30Btn.addEventListener('click', () => makeClip(30));
+clip60Btn.addEventListener('click', () => makeClip(60));
 </script>
 </body>
 </html>
