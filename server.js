@@ -1,7 +1,18 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +36,64 @@ function send(ws, data) {
     ws.send(JSON.stringify(data));
   }
 }
+
+// ---- Clipes ----
+
+// Recebe o vídeo do clipe (enviado pelo navegador de quem assiste) e sobe pro Cloudinary
+app.post('/api/clips', upload.single('video'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Nenhum vídeo enviado.' });
+  }
+  const code = (req.body.code || 'sem-codigo').toString().trim().toUpperCase().slice(0, 20) || 'sem-codigo';
+
+  if (!process.env.CLOUDINARY_CLOUD_NAME) {
+    return res.status(500).json({ error: 'Cloudinary não configurado no servidor (variáveis de ambiente ausentes).' });
+  }
+
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        { resource_type: 'video', folder: 'clips', tags: ['clipe', code] },
+        (error, result) => (error ? reject(error) : resolve(result))
+      );
+      uploadStream.end(req.file.buffer);
+    });
+
+    res.json({ url: result.secure_url, id: result.public_id, createdAt: result.created_at, code });
+  } catch (err) {
+    console.error('Erro ao enviar clipe para o Cloudinary:', err);
+    res.status(500).json({ error: 'Falha ao salvar o clipe.' });
+  }
+});
+
+// Lista os clipes salvos, mais recentes primeiro
+app.get('/api/clips', async (req, res) => {
+  if (!process.env.CLOUDINARY_CLOUD_NAME) {
+    return res.json({ clips: [] });
+  }
+  try {
+    const result = await cloudinary.api.resources_by_tag('clipe', {
+      resource_type: 'video',
+      max_results: 50,
+      context: true,
+    });
+
+    const clips = (result.resources || [])
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .map((r) => ({
+        url: r.secure_url,
+        code: (r.tags || []).find((t) => t !== 'clipe') || '',
+        createdAt: r.created_at,
+      }));
+
+    res.json({ clips });
+  } catch (err) {
+    console.error('Erro ao listar clipes:', err);
+    res.status(500).json({ error: 'Falha ao carregar clipes.' });
+  }
+});
+
+// ---- Sinalização WebRTC ----
 
 wss.on('connection', (ws) => {
   ws.id = Math.random().toString(36).substring(2, 10);
@@ -62,7 +131,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'offer': {
-        // do transmissor para um espectador específico
         const room = rooms.get(ws.code);
         if (!room) return;
         const viewer = room.viewers.get(msg.target);
@@ -71,7 +139,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'answer': {
-        // do espectador de volta ao transmissor
         const room = rooms.get(ws.code);
         if (!room) return;
         send(room.broadcaster, { type: 'answer', sdp: msg.sdp, from: ws.id });
