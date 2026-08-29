@@ -81,7 +81,6 @@ startBtn.addEventListener('click', async () => {
     }
   };
 
-  // Se o usuário parar o compartilhamento pelo próprio navegador
   localStream.getVideoTracks()[0].addEventListener('ended', () => {
     ws.close();
     location.reload();
