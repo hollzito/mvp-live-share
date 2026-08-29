@@ -1,40 +1,59 @@
-# MVP - Transmissão de tela com código
+[README.md](https://github.com/user-attachments/files/31605373/README.md)
+# MVP - Transmissão de tela com código + clipes
 
-Protótipo funcional: quem transmite compartilha a tela e recebe um código de 4 letras.
-Quem assiste digita o código no navegador e o vídeo chega via WebRTC (baixa latência, ~ menos de 1s na mesma rede).
+Quem transmite compartilha a tela e recebe um código de 4 letras. Quem assiste digita o código e o vídeo chega via WebRTC (baixa latência). Qualquer espectador pode clipar os últimos 30 ou 60 segundos, e o clipe fica salvo permanentemente, visível na galeria pra todo mundo.
+
+## Configurar o Cloudinary (necessário para os clipes)
+
+Os clipes são vídeos, e precisam ficar guardados em algum lugar permanente (o Render, onde o app roda, apaga arquivos locais quando reinicia). Por isso usamos o Cloudinary, que tem plano gratuito.
+
+1. Crie uma conta grátis em [cloudinary.com](https://cloudinary.com).
+2. No painel (Dashboard), copie três valores: **Cloud name**, **API Key** e **API Secret**.
+3. Localmente: copie o arquivo `.env.example` para `.env` e preencha os três valores.
+4. No Render: vá em Settings do seu serviço → **Environment** → adicione as três variáveis (`CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`) com os mesmos valores.
+
+Sem essas variáveis configuradas, o app continua funcionando normalmente para transmitir/assistir — só os clipes ficam desativados (o botão retorna erro ao tentar salvar).
+
+## Enviar clipes automaticamente pro Discord (opcional)
+
+Toda vez que um clipe é salvo, o app pode mandar o link automaticamente pra um canal do seu servidor Discord — o próprio Discord mostra o vídeo com player e miniatura direto no chat.
+
+1. No Discord, vá no canal desejado → clique na engrenagem (Editar Canal) → **Integrações** → **Webhooks** → **Novo Webhook**.
+2. Dê um nome (ex: "Clipes") e clique em **Copiar URL do Webhook**.
+3. No Render (ou no seu `.env` local), adicione a variável `DISCORD_WEBHOOK_URL` com esse link colado.
+
+Pronto — a partir do próximo deploy, todo clipe salvo aparece automaticamente nesse canal. Sem essa variável configurada, os clipes continuam funcionando normalmente, só não são enviados ao Discord.
 
 ## Como rodar
 
-1. Instale o [Node.js](https://nodejs.org) (versão 18 ou mais recente), se ainda não tiver.
-2. Abra um terminal (PowerShell/CMD) na pasta do projeto e rode:
+```
+npm install
+npm start
+```
 
-   ```
-   npm install
-   npm start
-   ```
+Abra `http://localhost:3000`.
 
-3. Abra `http://localhost:3000` no navegador (Chrome ou Edge recomendados).
-   - Em **"Iniciar transmissão"**, clique em "Compartilhar tela", escolha a tela/janela e anote o código gerado.
-   - Em outra aba/computador, abra **"Assistir com um código"** e digite o código.
+- **Transmitir**: clique em "Iniciar transmissão", compartilhe a tela, anote o código.
+- **Assistir**: em outra aba/computador, abra "Assistir com um código" e digite o código.
+- **Clipar**: enquanto assiste, use os botões "Clipar últimos 30s" ou "Clipar últimos 60s". O clipe é salvo automaticamente e aparece em "Ver clipes salvos".
 
-## Testando com outro computador na mesma rede
+## Testando pela internet
 
-- Descubra o IP local da máquina que roda o servidor (`ipconfig` no Windows, procure "Endereço IPv4").
-- No outro computador, acesse `http://SEU-IP:3000` em vez de `localhost`.
-
-## Testando pela internet (fora da rede local)
-
-`getDisplayMedia` (captura de tela) só funciona em `localhost` ou em conexões **HTTPS**. Para testar rapidamente com pessoas fora da sua rede, exponha o servidor com um túnel, por exemplo:
+`getDisplayMedia` só funciona em `localhost` ou HTTPS. Para testar rápido:
 
 ```
 npx ngrok http 3000
 ```
 
-Isso gera uma URL `https://...ngrok-free.app` que já resolve o requisito de HTTPS — use essa URL tanto para transmitir quanto para assistir.
+Para um link fixo permanente, publique no [Render](https://render.com) (veja instruções que já te passei antes) — não esqueça de configurar as variáveis do Cloudinary lá também.
 
-## Limitações deste MVP (esperadas, para evoluir depois)
+## Como funciona o clipe (detalhe técnico)
 
-- Sem TURN server: em redes com firewall/NAT restritivo (comum em redes corporativas), a conexão pode falhar. Para produção, adicionar um servidor TURN (ex: Twilio, Metered, ou self-hosted com `coturn`) resolve isso.
-- Topologia em estrela (um upload do transmissor por espectador): funciona bem até ~10 espectadores. Para escalar além disso, seria necessário um SFU (ex: LiveKit, mediasoup).
-- Código de sala não expira e não tem senha — qualquer pessoa com o código pode assistir.
-- Sem reconexão automática caso a internet caia.
+O navegador de quem está assistindo grava continuamente a transmissão em pedaços de 1 segundo, guardando só a última janela de ~65 segundos em memória (nada é enviado ao servidor o tempo todo). Só quando alguém clica em "Clipar", os últimos 30 ou 60 segundos são reunidos em um vídeo e enviados para o servidor, que faz o upload para o Cloudinary e retorna o link.
+
+## Limitações deste MVP
+
+- Sem TURN server: pode falhar em redes com firewall/NAT restritivo.
+- Sem senha na sala.
+- A gravação do clipe depende do navegador suportar `MediaRecorder` com WebM/VP8 (funciona bem no Chrome e Edge; pode não funcionar no Safari).
+- Plano gratuito do Cloudinary tem limite de armazenamento/banda (geralmente confortável para testes, mas vale acompanhar o painel deles se usarem bastante).
