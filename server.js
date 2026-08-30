@@ -24,7 +24,7 @@ const clipStorage = multer.diskStorage({
 });
 const upload = multer({
   storage: clipStorage,
-  limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 2, parts: 4 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 20, fields: 3, parts: 24 },
   fileFilter: (req, file, callback) => {
     if (file.mimetype === 'video/webm') return callback(null, true);
     const error = new Error('Formato de vídeo inválido. Envie um arquivo WebM.');
@@ -42,6 +42,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 // rooms: { code: { broadcaster: ws, viewers: Map(id -> ws) } }
 const rooms = new Map();
 const MAX_CONCURRENT_CLIPS = 1;
+const MAX_CLIP_SEGMENTS = 20;
+const MAX_CLIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 let activeClipProcesses = 0;
 
 // Manda o link do clipe pro canal do Discord configurado (se houver webhook definido)
@@ -80,14 +82,18 @@ function send(ws, data) {
 // ---- Clipes ----
 
 function receiveClip(req, res, next) {
-  upload.single('video')(req, res, (error) => {
+  upload.array('videos', MAX_CLIP_SEGMENTS)(req, res, async (error) => {
     if (!error) return next();
+
+    // O Multer pode já ter gravado alguns segmentos antes de rejeitar uma
+    // requisição. Eles também precisam ser removidos quando a rota não avança.
+    await removeTemporaryFiles((req.files || []).map((file) => file.path));
 
     if (error instanceof multer.MulterError) {
       console.warn(`Upload de clipe rejeitado pelo Multer (${error.code}).`);
       const status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
       const message = error.code === 'LIMIT_FILE_SIZE'
-        ? 'O clipe ultrapassou o limite de 100 MB.'
+        ? 'Um segmento do clipe ultrapassou o limite de 20 MB.'
         : 'Upload de clipe inválido.';
       return res.status(status).json({ error: message });
     }
@@ -102,21 +108,29 @@ async function removeTemporaryFiles(paths) {
 
 // Recebe o vídeo do clipe (enviado pelo navegador de quem assiste) e sobe pro Cloudinary
 app.post('/api/clips', receiveClip, async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'Nenhum vídeo enviado.' });
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'Nenhum segmento de vídeo enviado.' });
   }
-  const temporaryFiles = [req.file.path];
+  const temporaryFiles = req.files.map((file) => file.path);
   let acquiredClipSlot = false;
 
   try {
     const code = (req.body.code || '').toString().trim().toUpperCase();
     const duration = parseClipDuration(req.body.duration);
+    const startOffsetMs = Number(req.body.startOffsetMs);
+    const totalUploadBytes = req.files.reduce((total, file) => total + file.size, 0);
 
     if (!/^[A-Z0-9]{4}$/.test(code)) {
       return res.status(400).json({ error: 'Código de sala inválido.' });
     }
     if (!duration) {
       return res.status(400).json({ error: 'Duração de clipe inválida. Use 30 ou 60 segundos.' });
+    }
+    if (!Number.isFinite(startOffsetMs) || startOffsetMs < 0 || startOffsetMs > 10_000) {
+      return res.status(400).json({ error: 'Offset inicial do clipe inválido.' });
+    }
+    if (totalUploadBytes > MAX_CLIP_UPLOAD_BYTES) {
+      return res.status(413).json({ error: 'O conjunto de segmentos ultrapassou o limite de 100 MB.' });
     }
     if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
       return res.status(500).json({ error: 'Cloudinary não configurado no servidor (variáveis de ambiente ausentes).' });
@@ -129,7 +143,11 @@ app.post('/api/clips', receiveClip, async (req, res) => {
     activeClipProcesses += 1;
     acquiredClipSlot = true;
 
-    const normalizedClipPath = await normalizeClip(req.file.path, duration);
+    const normalizedClipPath = await normalizeClip(
+      req.files.map((file) => file.path),
+      duration,
+      startOffsetMs / 1000
+    );
     temporaryFiles.push(normalizedClipPath);
     const result = await cloudinary.uploader.upload(normalizedClipPath, {
       resource_type: 'video',

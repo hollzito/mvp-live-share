@@ -1,4 +1,5 @@
 const { spawn } = require('child_process');
+const { unlink, writeFile } = require('fs/promises');
 const ffmpegPath = require('ffmpeg-static');
 
 const ALLOWED_CLIP_DURATIONS = new Set([30, 60]);
@@ -41,38 +42,55 @@ function runFfmpeg(args, timeoutMs = 180_000) {
   });
 }
 
-async function normalizeClip(inputPath, duration) {
-  const outputPath = `${inputPath}.mp4`;
+async function normalizeClip(inputPaths, duration, startOffsetSeconds = 0) {
+  if (!Array.isArray(inputPaths) || inputPaths.length === 0) {
+    throw new Error('Nenhum segmento de vídeo recebido.');
+  }
 
-  // MediaRecorder mantém os timestamps da gravação original nos chunks.
-  // O FFmpeg busca a partir do fim, decodifica desde um keyframe anterior e
-  // recria timestamps iniciando em zero, produzindo um clipe reproduzível e
-  // com duração limitada ao valor solicitado. Um único thread reduz os picos
-  // de CPU e memória nas instâncias menores do Render.
-  await runFfmpeg([
-    '-y',
-    '-hide_banner',
-    '-loglevel', 'error',
-    '-sseof', `-${duration}`,
-    '-i', inputPath,
-    '-t', String(duration),
-    '-map', '0:v:0',
-    '-map', '0:a:0?',
-    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setpts=PTS-STARTPTS',
-    '-af', 'asetpts=PTS-STARTPTS',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-crf', '26',
-    '-maxrate', '4M',
-    '-bufsize', '8M',
-    '-threads', '1',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-movflags', '+faststart',
-    outputPath,
-  ]);
+  const outputPath = `${inputPaths[0]}.mp4`;
+  const concatPath = `${inputPaths[0]}.concat.txt`;
+  const concatContent = inputPaths
+    .map((inputPath) => `file '${inputPath.replace(/\\/g, '/')}'`)
+    .join('\n');
 
-  return outputPath;
+  try {
+    await writeFile(concatPath, concatContent, 'utf8');
+
+    // Cada entrada é um WebM completo iniciado pelo próprio MediaRecorder.
+    // O demuxer concat cria uma linha do tempo contínua; o offset calculado no
+    // navegador remove apenas a sobra do primeiro segmento selecionado.
+    await runFfmpeg([
+      '-y',
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatPath,
+      '-ss', String(startOffsetSeconds),
+      '-t', String(duration),
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2,setpts=PTS-STARTPTS',
+      '-af', 'asetpts=PTS-STARTPTS',
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-crf', '26',
+      '-maxrate', '4M',
+      '-bufsize', '8M',
+      '-threads', '1',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+      outputPath,
+    ]);
+
+    return outputPath;
+  } catch (error) {
+    await unlink(outputPath).catch(() => {});
+    throw error;
+  } finally {
+    await unlink(concatPath).catch(() => {});
+  }
 }
 
 module.exports = { normalizeClip, parseClipDuration };
