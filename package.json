@@ -5,7 +5,8 @@
   "description": "MVP de transmissão de tela com código de sala, via WebRTC, com clipes salvos via Cloudinary",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "benchmark:clips": "node scripts/benchmark-clips.js"
   },
   "dependencies": {
     "cloudinary": "^2.4.0",

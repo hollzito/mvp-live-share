@@ -164,6 +164,7 @@ test('processa o upload em disco e remove os arquivos temporários', async () =>
     formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip.webm');
     formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip-2.webm');
     formData.append('startOffsetMs', '1000');
+    formData.append('segmentDurationsMs', '[3000,3000]');
 
     const response = await fetch(`${baseUrl}/api/clips`, {
       method: 'POST',
@@ -177,11 +178,11 @@ test('processa o upload em disco e remove os arquivos temporários', async () =>
     assert.equal(data.url, 'https://example.test/clip.mp4');
     assert.equal(viewerResult.url, data.url);
     assert.equal(viewerResult.requestId, clipRequest.requestId);
-    assert.ok(uploadedPath.endsWith('.webm.mp4'));
+    assert.ok(uploadedPath.endsWith('.webm.clip.webm'));
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(access(uploadedPath));
-    await assert.rejects(access(uploadedPath.slice(0, -4)));
+    await assert.rejects(access(uploadedPath.slice(0, -'.clip.webm'.length)));
   } finally {
     broadcaster?.close();
     viewer?.close();
@@ -193,6 +194,7 @@ test('rejeita upload sem solicitação antes de executar o processamento', async
   const formData = new FormData();
   formData.append('videos', new Blob(['invalido'], { type: 'video/webm' }), 'clip.webm');
   formData.append('startOffsetMs', '0');
+  formData.append('segmentDurationsMs', '[1000]');
 
   const response = await fetch(`${baseUrl}/api/clips`, { method: 'POST', body: formData });
   assert.equal(response.status, 403);

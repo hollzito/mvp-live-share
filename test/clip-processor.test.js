@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { mkdtemp, rm } = require('node:fs/promises');
+const { copyFile, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -48,6 +48,14 @@ async function mediaDuration(filePath) {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
+async function overwriteWebmDuration(filePath, durationMs) {
+  const contents = await readFile(filePath);
+  const durationElement = contents.indexOf(Buffer.from([0x44, 0x89, 0x88]));
+  assert.notEqual(durationElement, -1, 'o WebM de teste deve possuir o elemento Duration');
+  contents.writeDoubleBE(durationMs, durationElement + 3);
+  await writeFile(filePath, contents);
+}
+
 test('aceita somente as durações expostas pela interface', () => {
   assert.equal(parseClipDuration('30'), 30);
   assert.equal(parseClipDuration(60), 60);
@@ -58,7 +66,7 @@ test('aceita somente as durações expostas pela interface', () => {
 test('recodifica e limita a duração do clipe', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-test-'));
   const sourcePath = path.join(directory, 'source.webm');
-  const outputPath = `${sourcePath}.mp4`;
+  const outputPath = `${sourcePath}.clip.webm`;
 
   try {
     await ffmpeg([
@@ -68,7 +76,7 @@ test('recodifica e limita a duração do clipe', async () => {
       '-t', '5', '-c:v', 'libvpx', '-c:a', 'libopus', sourcePath,
     ]);
 
-    const normalizedPath = await normalizeClip([sourcePath], 2, 3);
+    const normalizedPath = await normalizeClip([sourcePath], 2, 3, [5]);
     assert.equal(normalizedPath, outputPath);
 
     const duration = await mediaDuration(outputPath);
@@ -81,7 +89,7 @@ test('recodifica e limita a duração do clipe', async () => {
 test('preserva um clipe menor quando ainda não há 30 segundos gravados', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-test-'));
   const sourcePath = path.join(directory, 'source.webm');
-  const outputPath = `${sourcePath}.mp4`;
+  const outputPath = `${sourcePath}.clip.webm`;
 
   try {
     await ffmpeg([
@@ -90,10 +98,35 @@ test('preserva um clipe menor quando ainda não há 30 segundos gravados', async
       '-t', '3', '-c:v', 'libvpx', sourcePath,
     ]);
 
-    const normalizedPath = await normalizeClip([sourcePath], 30);
+    const normalizedPath = await normalizeClip([sourcePath], 30, 0, [3]);
     assert.equal(normalizedPath, outputPath);
     const duration = await mediaDuration(outputPath);
     assert.ok(duration >= 2.9 && duration <= 3.1, `duração obtida: ${duration}s`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('preserva 30s quando seis WebMs de 5s anunciam duração incorreta', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-duration-test-'));
+  const templatePath = path.join(directory, 'template.webm');
+  const segmentPaths = Array.from(
+    { length: 6 },
+    (_, index) => path.join(directory, `segment-${index}.webm`)
+  );
+
+  try {
+    await ffmpeg([
+      '-y', '-hide_banner', '-loglevel', 'error',
+      '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30',
+      '-t', '5', '-c:v', 'libvpx', templatePath,
+    ]);
+    await overwriteWebmDuration(templatePath, 1000);
+    await Promise.all(segmentPaths.map((segmentPath) => copyFile(templatePath, segmentPath)));
+
+    const normalizedPath = await normalizeClip(segmentPaths, 30, 0, Array(6).fill(5));
+    const duration = await mediaDuration(normalizedPath);
+    assert.ok(duration >= 29.9 && duration <= 30.1, `duração obtida: ${duration}s`);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -111,13 +144,18 @@ test('concatena segmentos completos e recorta exatamente a janela final', async 
         '-f', 'lavfi', '-i', `sine=frequency=${500 + (index * 250)}:sample_rate=48000`,
         '-t', '4', '-c:v', 'libvpx', '-c:a', 'libopus', segmentPaths[index],
       ]);
+      // Reproduz os WebMs observados em produção: o conteúdo tem 4s, mas o
+      // cabeçalho anuncia só 1s. Sem durações explícitas, a saída fica curta.
+      await overwriteWebmDuration(segmentPaths[index], 1000);
     }
 
-    // Três segmentos totalizam 12s. O offset de 7s deve produzir os 5s finais,
-    // sem depender dos timestamps internos de uma gravação anterior.
-    const normalizedPath = await normalizeClip(segmentPaths, 5, 7);
+    // Os dois segmentos selecionados totalizam 8s. O offset de 3s recodifica
+    // somente o fim do primeiro e copia diretamente o segundo.
+    const normalizedPath = await normalizeClip(segmentPaths.slice(1), 5, 3, [4, 4]);
     const duration = await mediaDuration(normalizedPath);
     assert.ok(duration >= 4.9 && duration <= 5.1, `duração obtida: ${duration}s`);
+    const mediaInfo = await ffmpeg(['-hide_banner', '-i', normalizedPath, '-f', 'null', '-']);
+    assert.match(mediaInfo, /Video: vp8/, 'os segmentos devem permanecer em VP8 sem recodificação integral');
 
     const beginning = await samplePixel(normalizedPath, 0.2);
     const ending = await samplePixel(normalizedPath, 2);

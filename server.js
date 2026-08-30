@@ -56,6 +56,7 @@ const MAX_CLIP_SEGMENTS = 20;
 const MAX_CLIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 const CLIP_REQUEST_TIMEOUT_MS = 30_000;
 const CLIPS_CACHE_TTL_MS = 30_000;
+const MAX_RECORDED_SEGMENT_DURATION_MS = 120_000;
 let activeClipProcesses = 0;
 let clipsCache = null;
 let clipsRefreshPromise = null;
@@ -118,6 +119,7 @@ function admitClipUpload(req, res, next) {
   clearTimeout(clipRequest.timeout);
   clipRequest.status = 'uploading';
   req.clipRequest = clipRequest;
+  req.clipAdmittedAt = performance.now();
   activeClipProcesses += 1;
   next();
 }
@@ -170,6 +172,21 @@ async function removeTemporaryFiles(paths) {
   await Promise.allSettled(paths.filter(Boolean).map((filePath) => unlink(filePath)));
 }
 
+function parseSegmentDurations(rawValue, expectedCount) {
+  let values;
+  try {
+    values = JSON.parse(rawValue);
+  } catch {
+    return null;
+  }
+
+  if (!Array.isArray(values) || values.length !== expectedCount) return null;
+  if (values.some((value) => !Number.isFinite(value)
+    || value <= 0
+    || value > MAX_RECORDED_SEGMENT_DURATION_MS)) return null;
+  return values;
+}
+
 // Recebe os segmentos autorizados do transmissor e envia o clipe ao Cloudinary.
 app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
   const temporaryFiles = (req.files || []).map((file) => file.path);
@@ -184,9 +201,16 @@ app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
 
     const { code, duration } = req.clipRequest;
     const startOffsetMs = Number(req.body.startOffsetMs);
+    const segmentDurationsMs = parseSegmentDurations(req.body.segmentDurationsMs, req.files.length);
     const totalUploadBytes = req.files.reduce((total, file) => total + file.size, 0);
 
-    if (!Number.isFinite(startOffsetMs) || startOffsetMs < 0 || startOffsetMs > 10_000) {
+    if (!segmentDurationsMs) {
+      viewerMessage.message = 'Durações dos segmentos inválidas.';
+      return res.status(400).json({ error: viewerMessage.message });
+    }
+    if (!Number.isFinite(startOffsetMs)
+      || startOffsetMs < 0
+      || startOffsetMs >= segmentDurationsMs[0]) {
       viewerMessage.message = 'Offset inicial do clipe inválido.';
       return res.status(400).json({ error: viewerMessage.message });
     }
@@ -203,7 +227,8 @@ app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
     const normalizedClipPath = await normalizeClip(
       req.files.map((file) => file.path),
       duration,
-      startOffsetMs / 1000
+      startOffsetMs / 1000,
+      segmentDurationsMs.map((value) => value / 1000)
     );
     const ffmpegDurationMs = performance.now() - ffmpegStartedAt;
     temporaryFiles.push(normalizedClipPath);
@@ -212,7 +237,6 @@ app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
       resource_type: 'video',
       folder: 'clips',
       tags: ['clipe', code],
-      format: 'mp4',
     });
     const cloudinaryDurationMs = performance.now() - cloudinaryStartedAt;
 
@@ -224,11 +248,14 @@ app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
       event: 'clip_processed',
       code,
       duration,
+      recordedDurationMs: Math.round(segmentDurationsMs.reduce((total, value) => total + value, 0) - startOffsetMs),
+      outputDurationSeconds: Number.isFinite(result.duration) ? result.duration : undefined,
       segments: req.files.length,
       uploadBytes: totalUploadBytes,
+      incomingUploadDurationMs: Math.round(startedAt - req.clipAdmittedAt),
       ffmpegDurationMs: Math.round(ffmpegDurationMs),
       cloudinaryDurationMs: Math.round(cloudinaryDurationMs),
-      totalDurationMs: Math.round(performance.now() - startedAt),
+      totalDurationMs: Math.round(performance.now() - req.clipAdmittedAt),
     }));
 
     notifyDiscord(result.secure_url, code);

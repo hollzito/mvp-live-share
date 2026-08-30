@@ -1,7 +1,7 @@
 (function exposeRollingClipRecorder(globalScope) {
   const DEFAULT_SEGMENT_MS = 5000;
   const DEFAULT_BUFFER_MS = 75_000;
-  const DEFAULT_VIDEO_BITS_PER_SECOND = 8_000_000;
+  const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000;
   const DEFAULT_AUDIO_BITS_PER_SECOND = 128_000;
 
   class RollingClipRecorder {
@@ -14,6 +14,7 @@
       this.segments = [];
       this.recorder = null;
       this.currentSegmentDone = Promise.resolve();
+      this.currentSegmentStop = null;
       this.stopped = false;
     }
 
@@ -27,7 +28,7 @@
 
     stop() {
       this.stopped = true;
-      if (this.recorder?.state === 'recording') this.recorder.stop();
+      this.currentSegmentStop?.();
     }
 
     pruneBuffer() {
@@ -67,8 +68,15 @@
 
       let resolveSegment;
       const segmentDone = new Promise((resolve) => { resolveSegment = resolve; });
+      let stopRequestedAt;
+      const stopSegment = () => {
+        if (segmentRecorder.state !== 'recording') return;
+        stopRequestedAt = performance.now();
+        segmentRecorder.stop();
+      };
       this.recorder = segmentRecorder;
       this.currentSegmentDone = segmentDone;
+      this.currentSegmentStop = stopSegment;
 
       segmentRecorder.ondataavailable = (event) => {
         if (event.data?.size > 0) chunks.push(event.data);
@@ -77,7 +85,10 @@
       let segmentTimer;
       segmentRecorder.onstop = () => {
         clearTimeout(segmentTimer);
-        const durationMs = Math.max(1, performance.now() - startedAt);
+        // onstop pode chegar atrasado enquanto o navegador finaliza o WebM.
+        // A duração termina no instante em que stop() foi solicitado, sem
+        // incorporar esse custo de finalização à linha do tempo do vídeo.
+        const durationMs = Math.max(1, (stopRequestedAt || performance.now()) - startedAt);
         if (chunks.length > 0) {
           this.segments.push({
             blob: new Blob(chunks, { type: segmentRecorder.mimeType || 'video/webm' }),
@@ -86,7 +97,10 @@
           this.pruneBuffer();
         }
 
-        if (this.recorder === segmentRecorder) this.recorder = null;
+        if (this.recorder === segmentRecorder) {
+          this.recorder = null;
+          this.currentSegmentStop = null;
+        }
         resolveSegment();
         if (!this.stopped && this.hasLiveVideoTrack()) this.startSegment();
       };
@@ -96,16 +110,14 @@
       };
 
       segmentRecorder.start();
-      segmentTimer = setTimeout(() => {
-        if (segmentRecorder.state === 'recording') segmentRecorder.stop();
-      }, this.segmentMs);
+      segmentTimer = setTimeout(stopSegment, this.segmentMs);
     }
 
     async finalizeCurrentSegment() {
       if (!this.recorder) return;
       const segmentRecorder = this.recorder;
       const segmentDone = this.currentSegmentDone;
-      if (segmentRecorder.state === 'recording') segmentRecorder.stop();
+      if (segmentRecorder.state === 'recording') this.currentSegmentStop?.();
       await segmentDone;
     }
 
