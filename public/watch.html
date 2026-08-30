@@ -41,6 +41,7 @@
 
   <p><a href="/clips.html">Ver todos os clipes salvos →</a></p>
 
+<script src="/clip-buffer.js"></script>
 <script>
 const joinBtn = document.getElementById('joinBtn');
 const codeInput = document.getElementById('codeInput');
@@ -58,12 +59,12 @@ let currentCode = '';
 let joinedRoom = false;
 
 // --- Buffer contínuo para os clipes ---
-const CHUNK_MS = 1000;         // frequência aproximada de cada pedaço gravado
-const MAX_BUFFER_MS = 75_000;  // inclui margem para decodificar um keyframe antes do corte
+const SEGMENT_MS = 5000;
+const MAX_BUFFER_MS = 75_000;
+let recordingStream;
 let recorder;
-let headerChunk = null;   // primeiro pedaço, contém o cabeçalho do vídeo (necessário sempre)
-let chunkBuffer = [];     // { blob, recordedAt }: janela deslizante medida por tempo real
-let pendingDataRequest = null;
+let segmentBuffer = []; // cada item é um WebM completo e reproduzível
+let currentSegmentDone = Promise.resolve();
 
 codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinBtn.click(); });
 
@@ -154,56 +155,88 @@ function setupPeerConnection() {
 }
 
 function startRecordingBuffer(stream) {
-  if (recorder) return; // já iniciado
-  try {
-    recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
-  } catch (e) {
-    console.warn('Gravação de clipes não suportada neste navegador:', e);
-    return;
-  }
-
-  recorder.ondataavailable = (event) => {
-    if (!event.data || event.data.size === 0) return;
-    if (!headerChunk) {
-      headerChunk = event.data; // primeiro pedaço = cabeçalho do vídeo
-      if (pendingDataRequest) pendingDataRequest();
-      return;
-    }
-
-    const recordedAt = performance.now();
-    chunkBuffer.push({ blob: event.data, recordedAt });
-    const cutoff = recordedAt - MAX_BUFFER_MS;
-    while (chunkBuffer.length > 1 && chunkBuffer[0].recordedAt < cutoff) {
-      chunkBuffer.shift();
-    }
-
-    if (pendingDataRequest) pendingDataRequest();
-  };
-
-  recorder.start(CHUNK_MS);
+  if (recordingStream) return;
+  recordingStream = stream;
+  startRecordingSegment();
   clipBar.style.display = 'block';
 }
 
-function flushRecorderData() {
-  if (!recorder || recorder.state !== 'recording') return Promise.resolve();
+function hasLiveVideoTrack() {
+  return recordingStream && recordingStream.getVideoTracks().some((track) => track.readyState === 'live');
+}
 
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      pendingDataRequest = null;
-      resolve();
-    }, CHUNK_MS * 2);
+function pruneSegmentBuffer() {
+  let bufferedDuration = segmentBuffer.reduce((total, segment) => total + segment.durationMs, 0);
+  while (segmentBuffer.length > 1 && bufferedDuration - segmentBuffer[0].durationMs >= MAX_BUFFER_MS) {
+    bufferedDuration -= segmentBuffer[0].durationMs;
+    segmentBuffer.shift();
+  }
+}
 
-    pendingDataRequest = () => {
-      clearTimeout(timeout);
-      pendingDataRequest = null;
-      resolve();
-    };
-    recorder.requestData();
-  });
+function startRecordingSegment() {
+  if (!hasLiveVideoTrack()) return;
+
+  const chunks = [];
+  const startedAt = performance.now();
+  const supportedType = [
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ].find((type) => MediaRecorder.isTypeSupported(type));
+  let segmentRecorder;
+
+  try {
+    segmentRecorder = new MediaRecorder(
+      recordingStream,
+      supportedType ? { mimeType: supportedType } : undefined
+    );
+  } catch (e) {
+    console.warn('Gravação de clipes não suportada neste navegador:', e);
+    recorder = null;
+    clipStatus.textContent = 'Este navegador não conseguiu iniciar a gravação dos clipes.';
+    return;
+  }
+
+  let resolveSegment;
+  const segmentDone = new Promise((resolve) => { resolveSegment = resolve; });
+  recorder = segmentRecorder;
+  currentSegmentDone = segmentDone;
+
+  segmentRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) chunks.push(event.data);
+  };
+
+  segmentRecorder.onstop = () => {
+    const durationMs = Math.max(1, performance.now() - startedAt);
+    if (chunks.length > 0) {
+      segmentBuffer.push({
+        blob: new Blob(chunks, { type: segmentRecorder.mimeType || 'video/webm' }),
+        durationMs,
+      });
+      pruneSegmentBuffer();
+    }
+
+    if (recorder === segmentRecorder) recorder = null;
+    resolveSegment();
+    if (hasLiveVideoTrack()) startRecordingSegment();
+  };
+
+  segmentRecorder.start();
+  setTimeout(() => {
+    if (segmentRecorder.state === 'recording') segmentRecorder.stop();
+  }, SEGMENT_MS);
+}
+
+async function finalizeCurrentSegment() {
+  if (!recorder) return;
+  const segmentRecorder = recorder;
+  const segmentDone = currentSegmentDone;
+  if (segmentRecorder.state === 'recording') segmentRecorder.stop();
+  await segmentDone;
 }
 
 async function makeClip(seconds) {
-  if (!headerChunk || chunkBuffer.length === 0) {
+  if (!recorder && segmentBuffer.length === 0) {
     clipStatus.textContent = 'Ainda não há vídeo suficiente gravado. Espere alguns segundos.';
     return;
   }
@@ -216,15 +249,19 @@ async function makeClip(seconds) {
   try {
     clipStatus.textContent = 'Preparando clipe...';
 
-    // Inclui toda a janela (e não apenas N chunks): o servidor usa a margem
-    // para decodificar um keyframe e faz o corte exato a partir do fim.
-    await flushRecorderData();
-    const blob = new Blob([headerChunk, ...chunkBuffer.map((chunk) => chunk.blob)], { type: 'video/webm' });
+    // Finaliza o segmento atual para que cada arquivo enviado tenha seu próprio
+    // cabeçalho, timestamps iniciando em zero e um primeiro quadro decodificável.
+    await finalizeCurrentSegment();
+    const selection = selectClipSegments(segmentBuffer, seconds * 1000);
+    if (selection.segments.length === 0) throw new Error('Nenhum segmento de vídeo disponível.');
 
     const formData = new FormData();
-    formData.append('video', blob, `clipe-${currentCode}-${Date.now()}.webm`);
+    selection.segments.forEach((segment, index) => {
+      formData.append('videos', segment.blob, `segmento-${index}.webm`);
+    });
     formData.append('code', currentCode);
     formData.append('duration', String(seconds));
+    formData.append('startOffsetMs', String(Math.round(selection.startOffsetMs)));
 
     clipStatus.textContent = 'Enviando e processando clipe...';
     const res = await fetch('/api/clips', { method: 'POST', body: formData, signal: controller.signal });

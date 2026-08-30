@@ -91,9 +91,11 @@ test('processa o upload em disco e remove os arquivos temporários', async () =>
     };
 
     const formData = new FormData();
-    formData.append('video', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip.webm');
+    formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip.webm');
+    formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip-2.webm');
     formData.append('code', 'AB12');
     formData.append('duration', '30');
+    formData.append('startOffsetMs', '1000');
 
     const response = await fetch(`${baseUrl}/api/clips`, { method: 'POST', body: formData });
     const data = await response.json();

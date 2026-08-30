@@ -49,7 +49,7 @@ Para um link fixo permanente, publique no [Render](https://render.com) (veja ins
 
 ## Como funciona o clipe (detalhe técnico)
 
-O navegador de quem está assistindo grava continuamente a transmissão em pedaços de aproximadamente 1 segundo, guardando só a última janela de ~75 segundos em memória (nada é enviado ao servidor o tempo todo). Quando alguém clica em "Clipar", essa janela é enviada ao servidor e armazenada temporariamente em disco, sem manter o vídeo inteiro na memória do Node.js. O servidor usa a margem anterior para decodificar o primeiro keyframe, recodifica o resultado com timestamps iniciando em zero, limita a saída aos últimos 30 ou 60 segundos e então envia o MP4 ao Cloudinary. Para evitar picos de CPU e memória em instâncias pequenas, apenas um clipe é processado por vez em cada instância.
+O navegador de quem está assistindo grava continuamente a transmissão em segmentos WebM completos de aproximadamente 5 segundos, guardando só a última janela de ~75 segundos em memória (nada é enviado ao servidor o tempo todo). Quando alguém clica em "Clipar", apenas os segmentos necessários são enviados e armazenados temporariamente em disco, sem manter o vídeo inteiro na memória do Node.js. O servidor concatena esses segmentos em uma linha do tempo contínua, remove a sobra anterior à janela solicitada, limita a saída a 30 ou 60 segundos e envia o MP4 ao Cloudinary. Como cada segmento tem seu próprio cabeçalho e começa em um quadro decodificável, clipes consecutivos não dependem dos timestamps da gravação anterior. Para evitar picos de CPU e memória em instâncias pequenas, apenas um clipe é processado por vez em cada instância.
 
 ## Limitações deste MVP
 
