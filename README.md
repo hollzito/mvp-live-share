@@ -49,7 +49,7 @@ Para um link fixo permanente, publique no [Render](https://render.com) (veja ins
 
 ## Como funciona o clipe (detalhe técnico)
 
-O navegador de quem está assistindo grava continuamente a transmissão em pedaços de 1 segundo, guardando só a última janela de ~65 segundos em memória (nada é enviado ao servidor o tempo todo). Só quando alguém clica em "Clipar", os últimos 30 ou 60 segundos são reunidos em um vídeo e enviados para o servidor, que faz o upload para o Cloudinary e retorna o link.
+O navegador de quem está assistindo grava continuamente a transmissão em pedaços de aproximadamente 1 segundo, guardando só a última janela de ~75 segundos em memória (nada é enviado ao servidor o tempo todo). Quando alguém clica em "Clipar", essa janela é enviada ao servidor. O servidor usa a margem anterior para decodificar o primeiro keyframe, recodifica o resultado com timestamps iniciando em zero, limita a saída aos últimos 30 ou 60 segundos e então envia o MP4 ao Cloudinary.
 
 ## Limitações deste MVP
 

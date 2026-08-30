@@ -57,11 +57,12 @@ let ws, pc;
 let currentCode = '';
 
 // --- Buffer contínuo para os clipes ---
-const CHUNK_MS = 1000;       // tamanho de cada pedaço gravado
-const MAX_BUFFER_SECONDS = 65; // mantemos só um pouco mais que o clipe máximo (60s)
+const CHUNK_MS = 1000;         // frequência aproximada de cada pedaço gravado
+const MAX_BUFFER_MS = 75_000;  // inclui margem para decodificar um keyframe antes do corte
 let recorder;
 let headerChunk = null;   // primeiro pedaço, contém o cabeçalho do vídeo (necessário sempre)
-let chunkBuffer = [];     // pedaços mais recentes (janela deslizante)
+let chunkBuffer = [];     // { blob, recordedAt }: janela deslizante medida por tempo real
+let pendingDataRequest = null;
 
 codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinBtn.click(); });
 
@@ -133,16 +134,40 @@ function startRecordingBuffer(stream) {
     if (!event.data || event.data.size === 0) return;
     if (!headerChunk) {
       headerChunk = event.data; // primeiro pedaço = cabeçalho do vídeo
+      if (pendingDataRequest) pendingDataRequest();
       return;
     }
-    chunkBuffer.push(event.data);
-    if (chunkBuffer.length > MAX_BUFFER_SECONDS) {
+
+    const recordedAt = performance.now();
+    chunkBuffer.push({ blob: event.data, recordedAt });
+    const cutoff = recordedAt - MAX_BUFFER_MS;
+    while (chunkBuffer.length > 1 && chunkBuffer[0].recordedAt < cutoff) {
       chunkBuffer.shift();
     }
+
+    if (pendingDataRequest) pendingDataRequest();
   };
 
   recorder.start(CHUNK_MS);
   clipBar.style.display = 'block';
+}
+
+function flushRecorderData() {
+  if (!recorder || recorder.state !== 'recording') return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingDataRequest = null;
+      resolve();
+    }, CHUNK_MS * 2);
+
+    pendingDataRequest = () => {
+      clearTimeout(timeout);
+      pendingDataRequest = null;
+      resolve();
+    };
+    recorder.requestData();
+  });
 }
 
 async function makeClip(seconds) {
@@ -155,12 +180,15 @@ async function makeClip(seconds) {
   clip60Btn.disabled = true;
   clipStatus.textContent = 'Preparando clipe...';
 
-  const wanted = chunkBuffer.slice(-seconds);
-  const blob = new Blob([headerChunk, ...wanted], { type: 'video/webm' });
+  // Inclui toda a janela (e não apenas N chunks): o servidor usa a margem
+  // para decodificar um keyframe e faz o corte exato a partir do fim.
+  await flushRecorderData();
+  const blob = new Blob([headerChunk, ...chunkBuffer.map((chunk) => chunk.blob)], { type: 'video/webm' });
 
   const formData = new FormData();
   formData.append('video', blob, `clipe-${currentCode}-${Date.now()}.webm`);
   formData.append('code', currentCode);
+  formData.append('duration', String(seconds));
 
   try {
     clipStatus.textContent = 'Enviando clipe...';

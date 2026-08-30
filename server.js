@@ -6,6 +6,7 @@ const path = require('path');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const fetch = require('node-fetch');
+const { normalizeClip, parseClipDuration } = require('./clip-processor');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -65,18 +66,29 @@ app.post('/api/clips', upload.single('video'), async (req, res) => {
     return res.status(400).json({ error: 'Nenhum vídeo enviado.' });
   }
   const code = (req.body.code || 'sem-codigo').toString().trim().toUpperCase().slice(0, 20) || 'sem-codigo';
+  const duration = parseClipDuration(req.body.duration);
+
+  if (!duration) {
+    return res.status(400).json({ error: 'Duração de clipe inválida. Use 30 ou 60 segundos.' });
+  }
 
   if (!process.env.CLOUDINARY_CLOUD_NAME) {
     return res.status(500).json({ error: 'Cloudinary não configurado no servidor (variáveis de ambiente ausentes).' });
   }
 
   try {
+    const normalizedClip = await normalizeClip(req.file.buffer, duration);
     const result = await new Promise((resolve, reject) => {
       const uploadStream = cloudinary.uploader.upload_stream(
-        { resource_type: 'video', folder: 'clips', tags: ['clipe', code] },
+        {
+          resource_type: 'video',
+          folder: 'clips',
+          tags: ['clipe', code],
+          format: 'mp4',
+        },
         (error, result) => (error ? reject(error) : resolve(result))
       );
-      uploadStream.end(req.file.buffer);
+      uploadStream.end(normalizedClip);
     });
 
     res.json({ url: result.secure_url, id: result.public_id, createdAt: result.created_at, code });
