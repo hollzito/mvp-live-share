@@ -58,7 +58,7 @@ test('aceita somente as durações expostas pela interface', () => {
 test('recodifica e limita a duração do clipe', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-test-'));
   const sourcePath = path.join(directory, 'source.webm');
-  const outputPath = `${sourcePath}.mp4`;
+  const outputPath = `${sourcePath}.clip.webm`;
 
   try {
     await ffmpeg([
@@ -81,7 +81,7 @@ test('recodifica e limita a duração do clipe', async () => {
 test('preserva um clipe menor quando ainda não há 30 segundos gravados', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-test-'));
   const sourcePath = path.join(directory, 'source.webm');
-  const outputPath = `${sourcePath}.mp4`;
+  const outputPath = `${sourcePath}.clip.webm`;
 
   try {
     await ffmpeg([
@@ -113,11 +113,13 @@ test('concatena segmentos completos e recorta exatamente a janela final', async 
       ]);
     }
 
-    // Três segmentos totalizam 12s. O offset de 7s deve produzir os 5s finais,
-    // sem depender dos timestamps internos de uma gravação anterior.
-    const normalizedPath = await normalizeClip(segmentPaths, 5, 7);
+    // Os dois segmentos selecionados totalizam 8s. O offset de 3s recodifica
+    // somente o fim do primeiro e copia diretamente o segundo.
+    const normalizedPath = await normalizeClip(segmentPaths.slice(1), 5, 3);
     const duration = await mediaDuration(normalizedPath);
     assert.ok(duration >= 4.9 && duration <= 5.1, `duração obtida: ${duration}s`);
+    const mediaInfo = await ffmpeg(['-hide_banner', '-i', normalizedPath, '-f', 'null', '-']);
+    assert.match(mediaInfo, /Video: vp8/, 'os segmentos devem permanecer em VP8 sem recodificação integral');
 
     const beginning = await samplePixel(normalizedPath, 0.2);
     const ending = await samplePixel(normalizedPath, 2);

@@ -38,7 +38,7 @@ test('mantém um único gravador contínuo e preserva segmentos entre clipes', a
   recorder.start();
 
   assert.equal(instances.length, 1);
-  assert.equal(instances[0].options.videoBitsPerSecond, 8_000_000);
+  assert.equal(instances[0].options.videoBitsPerSecond, 6_000_000);
 
   const firstClip = await recorder.select(30);
   assert.equal(firstClip.segments.length, 1);

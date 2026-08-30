@@ -118,6 +118,7 @@ function admitClipUpload(req, res, next) {
   clearTimeout(clipRequest.timeout);
   clipRequest.status = 'uploading';
   req.clipRequest = clipRequest;
+  req.clipAdmittedAt = performance.now();
   activeClipProcesses += 1;
   next();
 }
@@ -212,7 +213,6 @@ app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
       resource_type: 'video',
       folder: 'clips',
       tags: ['clipe', code],
-      format: 'mp4',
     });
     const cloudinaryDurationMs = performance.now() - cloudinaryStartedAt;
 
@@ -226,9 +226,10 @@ app.post('/api/clips', admitClipUpload, receiveClip, async (req, res) => {
       duration,
       segments: req.files.length,
       uploadBytes: totalUploadBytes,
+      incomingUploadDurationMs: Math.round(startedAt - req.clipAdmittedAt),
       ffmpegDurationMs: Math.round(ffmpegDurationMs),
       cloudinaryDurationMs: Math.round(cloudinaryDurationMs),
-      totalDurationMs: Math.round(performance.now() - startedAt),
+      totalDurationMs: Math.round(performance.now() - req.clipAdmittedAt),
     }));
 
     notifyDiscord(result.secure_url, code);

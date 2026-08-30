@@ -1,7 +1,7 @@
 (function exposeRollingClipRecorder(globalScope) {
   const DEFAULT_SEGMENT_MS = 5000;
   const DEFAULT_BUFFER_MS = 75_000;
-  const DEFAULT_VIDEO_BITS_PER_SECOND = 8_000_000;
+  const DEFAULT_VIDEO_BITS_PER_SECOND = 6_000_000;
   const DEFAULT_AUDIO_BITS_PER_SECOND = 128_000;
 
   class RollingClipRecorder {

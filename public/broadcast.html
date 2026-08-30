@@ -42,7 +42,8 @@ let clipRecorder;
 const peers = new Map(); // viewerId -> RTCPeerConnection
 
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-const MAX_VIDEO_BITRATE = 8_000_000;
+const MAX_WEBRTC_VIDEO_BITRATE = 8_000_000;
+const CLIP_VIDEO_BITRATE = 6_000_000;
 
 function sendSignal(message) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -114,7 +115,7 @@ startBtn.addEventListener('click', async () => {
 function ensureClipRecorder() {
   if (clipRecorder) return;
   clipRecorder = new RollingClipRecorder(localStream, {
-    videoBitsPerSecond: MAX_VIDEO_BITRATE,
+    videoBitsPerSecond: CLIP_VIDEO_BITRATE,
   });
   clipRecorder.start();
 }
@@ -169,7 +170,7 @@ async function addViewer(viewerId) {
   if (videoSender) {
     const parameters = videoSender.getParameters();
     if (!parameters.encodings?.length) parameters.encodings = [{}];
-    parameters.encodings[0].maxBitrate = MAX_VIDEO_BITRATE;
+    parameters.encodings[0].maxBitrate = MAX_WEBRTC_VIDEO_BITRATE;
     parameters.encodings[0].maxFramerate = 30;
     await videoSender.setParameters(parameters).catch((error) => {
       console.warn('O navegador não aplicou o limite de bitrate:', error);

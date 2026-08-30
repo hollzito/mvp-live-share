@@ -177,11 +177,11 @@ test('processa o upload em disco e remove os arquivos temporários', async () =>
     assert.equal(data.url, 'https://example.test/clip.mp4');
     assert.equal(viewerResult.url, data.url);
     assert.equal(viewerResult.requestId, clipRequest.requestId);
-    assert.ok(uploadedPath.endsWith('.webm.mp4'));
+    assert.ok(uploadedPath.endsWith('.webm.clip.webm'));
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(access(uploadedPath));
-    await assert.rejects(access(uploadedPath.slice(0, -4)));
+    await assert.rejects(access(uploadedPath.slice(0, -'.clip.webm'.length)));
   } finally {
     broadcaster?.close();
     viewer?.close();
