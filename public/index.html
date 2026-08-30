@@ -37,13 +37,23 @@
 <script>
 const MAX_ON_HOME = 6; // quantos clipes mostrar na página inicial
 
+function clipPoster(url) {
+  return url
+    .replace('/video/upload/', '/video/upload/so_0,w_640,q_auto,f_jpg/')
+    .replace(/\.[a-z0-9]+(?=($|\?))/i, '.jpg');
+}
+
+function optimizedClipUrl(url) {
+  return url.replace('/video/upload/', '/video/upload/q_auto/f_auto/');
+}
+
 async function loadRecentClips() {
   const statusEl = document.getElementById('clipsStatus');
   const grid = document.getElementById('clipsGrid');
   try {
-    const res = await fetch('/api/clips');
+    const res = await fetch(`/api/clips?limit=${MAX_ON_HOME}`);
     const data = await res.json();
-    const clips = (data.clips || []).slice(0, MAX_ON_HOME);
+    const clips = data.clips || [];
 
     if (clips.length === 0) {
       statusEl.textContent = 'Nenhum clipe salvo ainda. Assista uma transmissão e clipe um momento!';
@@ -53,7 +63,7 @@ async function loadRecentClips() {
     statusEl.textContent = '';
     grid.innerHTML = clips.map((c) => `
       <div class="card">
-        <video controls preload="metadata" src="${c.url}"></video>
+        <video controls preload="none" poster="${clipPoster(c.url)}" src="${optimizedClipUrl(c.url)}"></video>
         <div class="meta">
           <span>Sala: ${c.code || '—'}</span>
           <span>${new Date(c.createdAt).toLocaleString('pt-BR')}</span>

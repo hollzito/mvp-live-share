@@ -4,6 +4,8 @@ const ALLOWED_SIGNAL_TYPES = new Set([
   'offer',
   'answer',
   'ice-candidate',
+  'clip-request',
+  'clip-upload-failed',
 ]);
 
 function parseSignalMessage(raw) {

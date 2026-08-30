@@ -49,7 +49,9 @@ Para um link fixo permanente, publique no [Render](https://render.com) (veja ins
 
 ## Como funciona o clipe (detalhe técnico)
 
-O navegador de quem está assistindo grava continuamente a transmissão em segmentos WebM completos de aproximadamente 5 segundos, guardando só a última janela de ~75 segundos em memória (nada é enviado ao servidor o tempo todo). Quando alguém clica em "Clipar", apenas os segmentos necessários são enviados e armazenados temporariamente em disco, sem manter o vídeo inteiro na memória do Node.js. O servidor concatena esses segmentos em uma linha do tempo contínua, remove a sobra anterior à janela solicitada, limita a saída a 30 ou 60 segundos e envia o MP4 ao Cloudinary. Como cada segmento tem seu próprio cabeçalho e começa em um quadro decodificável, clipes consecutivos não dependem dos timestamps da gravação anterior. Para evitar picos de CPU e memória em instâncias pequenas, apenas um clipe é processado por vez em cada instância.
+O navegador de quem transmite mantém um único buffer em segmentos WebM completos de aproximadamente 5 segundos, limitado à última janela de ~75 segundos em memória. Os espectadores não gravam nem armazenam cópias: ao clicar em "Clipar", enviam apenas uma solicitação leve pelo WebSocket. O servidor autoriza a solicitação com um identificador temporário e o transmissor envia somente os segmentos necessários. O servidor concatena os arquivos, remove a sobra anterior à janela solicitada, normaliza a saída em até 1080p/30 FPS e envia o MP4 ao Cloudinary. Como cada segmento tem seu próprio cabeçalho e começa em um quadro decodificável, clipes consecutivos não dependem dos timestamps da gravação anterior.
+
+Para controlar CPU, memória, disco e tráfego, apenas um clipe é admitido por vez em cada instância e uploads sem solicitação válida são rejeitados antes de serem gravados. A listagem do Cloudinary possui cache curto e a galeria carrega apenas posters até o usuário iniciar um vídeo. O endpoint `/health` informa quantidade de salas, clipes ativos e tempo de atividade do processo.
 
 ## Limitações deste MVP
 
