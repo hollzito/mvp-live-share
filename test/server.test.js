@@ -164,6 +164,7 @@ test('processa o upload em disco e remove os arquivos temporários', async () =>
     formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip.webm');
     formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip-2.webm');
     formData.append('startOffsetMs', '1000');
+    formData.append('segmentDurationsMs', '[3000,3000]');
 
     const response = await fetch(`${baseUrl}/api/clips`, {
       method: 'POST',
@@ -193,6 +194,7 @@ test('rejeita upload sem solicitação antes de executar o processamento', async
   const formData = new FormData();
   formData.append('videos', new Blob(['invalido'], { type: 'video/webm' }), 'clip.webm');
   formData.append('startOffsetMs', '0');
+  formData.append('segmentDurationsMs', '[1000]');
 
   const response = await fetch(`${baseUrl}/api/clips`, { method: 'POST', body: formData });
   assert.equal(response.status, 403);

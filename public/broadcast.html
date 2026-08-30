@@ -140,7 +140,10 @@ async function uploadRequestedClip({ requestId, duration }) {
     selection.segments.forEach((segment, index) => {
       formData.append('videos', segment.blob, `segmento-${index}.webm`);
     });
-    formData.append('startOffsetMs', String(Math.round(selection.startOffsetMs)));
+    formData.append('startOffsetMs', String(selection.startOffsetMs));
+    formData.append('segmentDurationsMs', JSON.stringify(
+      selection.segments.map((segment) => segment.durationMs)
+    ));
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 240_000);

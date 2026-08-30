@@ -74,7 +74,10 @@ async function main() {
     const inputBytes = (await Promise.all(inputPaths.map((filePath) => stat(filePath))))
       .reduce((total, file) => total + file.size, 0);
     const startedAt = performance.now();
-    const outputPath = await normalizeClip(inputPaths, 60, 3);
+    const outputPath = await normalizeClip(inputPaths, 60, 3, [
+      ...Array(12).fill(5),
+      3,
+    ]);
     const processingDurationMs = performance.now() - startedAt;
     const outputBytes = (await stat(outputPath)).size;
     const referencePath = path.join(directory, 'full-transcode-reference.mp4');
