@@ -55,6 +55,7 @@ const clipStatus = document.getElementById('clipStatus');
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
 let ws, pc;
 let currentCode = '';
+let joinedRoom = false;
 
 // --- Buffer contínuo para os clipes ---
 const CHUNK_MS = 1000;         // frequência aproximada de cada pedaço gravado
@@ -66,24 +67,40 @@ let pendingDataRequest = null;
 
 codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') joinBtn.click(); });
 
+function sendSignal(message) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    errorMsg.textContent = 'A conexão com o servidor foi interrompida.';
+    return false;
+  }
+  ws.send(JSON.stringify(message));
+  return true;
+}
+
 joinBtn.addEventListener('click', () => {
+  if (joinBtn.disabled) return;
   const code = codeInput.value.trim().toUpperCase();
   if (!code) return;
   currentCode = code;
   errorMsg.textContent = '';
+  joinBtn.disabled = true;
+  joinBtn.textContent = 'Conectando...';
 
-  ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
+  const socket = new WebSocket(location.origin.replace(/^http/, 'ws'));
+  ws = socket;
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'join-room', code }));
+  socket.onopen = () => {
+    if (ws !== socket) return socket.close();
+    socket.send(JSON.stringify({ type: 'join-room', code }));
   };
 
-  ws.onmessage = async (event) => {
+  socket.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'error') {
       errorMsg.textContent = msg.message;
+      socket.close();
     } else if (msg.type === 'joined') {
+      joinedRoom = true;
       joinBox.style.display = 'none';
       remoteVideo.style.display = 'block';
       setupPeerConnection();
@@ -91,7 +108,7 @@ joinBtn.addEventListener('click', () => {
       await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      ws.send(JSON.stringify({ type: 'answer', sdp: answer }));
+      sendSignal({ type: 'answer', sdp: answer });
     } else if (msg.type === 'ice-candidate') {
       if (msg.candidate) {
         try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (e) {}
@@ -99,6 +116,21 @@ joinBtn.addEventListener('click', () => {
     } else if (msg.type === 'broadcast-ended') {
       alert('A transmissão foi encerrada.');
       location.reload();
+    }
+  };
+
+  socket.onerror = () => {
+    if (ws === socket && !joinedRoom) {
+      errorMsg.textContent = 'Não foi possível conectar ao servidor.';
+    }
+  };
+
+  socket.onclose = () => {
+    if (ws !== socket) return;
+    ws = null;
+    if (!joinedRoom) {
+      joinBtn.disabled = false;
+      joinBtn.textContent = 'Entrar';
     }
   };
 });
@@ -116,7 +148,7 @@ function setupPeerConnection() {
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      ws.send(JSON.stringify({ type: 'ice-candidate', candidate: event.candidate }));
+      sendSignal({ type: 'ice-candidate', candidate: event.candidate });
     }
   };
 }
@@ -178,31 +210,42 @@ async function makeClip(seconds) {
 
   clip30Btn.disabled = true;
   clip60Btn.disabled = true;
-  clipStatus.textContent = 'Preparando clipe...';
-
-  // Inclui toda a janela (e não apenas N chunks): o servidor usa a margem
-  // para decodificar um keyframe e faz o corte exato a partir do fim.
-  await flushRecorderData();
-  const blob = new Blob([headerChunk, ...chunkBuffer.map((chunk) => chunk.blob)], { type: 'video/webm' });
-
-  const formData = new FormData();
-  formData.append('video', blob, `clipe-${currentCode}-${Date.now()}.webm`);
-  formData.append('code', currentCode);
-  formData.append('duration', String(seconds));
+  const controller = new AbortController();
+  const requestTimeout = setTimeout(() => controller.abort(), 240_000);
 
   try {
-    clipStatus.textContent = 'Enviando clipe...';
-    const res = await fetch('/api/clips', { method: 'POST', body: formData });
-    const data = await res.json();
+    clipStatus.textContent = 'Preparando clipe...';
+
+    // Inclui toda a janela (e não apenas N chunks): o servidor usa a margem
+    // para decodificar um keyframe e faz o corte exato a partir do fim.
+    await flushRecorderData();
+    const blob = new Blob([headerChunk, ...chunkBuffer.map((chunk) => chunk.blob)], { type: 'video/webm' });
+
+    const formData = new FormData();
+    formData.append('video', blob, `clipe-${currentCode}-${Date.now()}.webm`);
+    formData.append('code', currentCode);
+    formData.append('duration', String(seconds));
+
+    clipStatus.textContent = 'Enviando e processando clipe...';
+    const res = await fetch('/api/clips', { method: 'POST', body: formData, signal: controller.signal });
+    const responseText = await res.text();
+    let data = {};
+    try { data = JSON.parse(responseText); } catch (e) {}
 
     if (!res.ok) {
-      clipStatus.textContent = 'Erro: ' + (data.error || 'não foi possível salvar o clipe.');
+      const fallback = res.status === 502
+        ? 'O servidor reiniciou durante o processamento. Aguarde alguns segundos e tente novamente.'
+        : `não foi possível salvar o clipe (HTTP ${res.status}).`;
+      clipStatus.textContent = 'Erro: ' + (data.error || fallback);
     } else {
       clipStatus.innerHTML = `Clipe salvo! <a href="${data.url}" target="_blank">Assistir</a> · <a href="/clips.html">Ver galeria</a>`;
     }
   } catch (err) {
-    clipStatus.textContent = 'Erro de conexão ao enviar o clipe.';
+    clipStatus.textContent = err.name === 'AbortError'
+      ? 'O processamento demorou mais de 4 minutos e foi cancelado.'
+      : 'Erro de conexão ao enviar o clipe.';
   } finally {
+    clearTimeout(requestTimeout);
     clip30Btn.disabled = false;
     clip60Btn.disabled = false;
   }

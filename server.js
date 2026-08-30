@@ -3,10 +3,14 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
+const os = require('os');
+const { randomUUID } = require('crypto');
+const { unlink } = require('fs/promises');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const fetch = require('node-fetch');
 const { normalizeClip, parseClipDuration } = require('./clip-processor');
+const { parseSignalMessage } = require('./signaling');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -14,16 +18,31 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+const clipStorage = multer.diskStorage({
+  destination: os.tmpdir(),
+  filename: (req, file, callback) => callback(null, `${randomUUID()}.webm`),
+});
+const upload = multer({
+  storage: clipStorage,
+  limits: { fileSize: 100 * 1024 * 1024, files: 1, fields: 2, parts: 4 },
+  fileFilter: (req, file, callback) => {
+    if (file.mimetype === 'video/webm') return callback(null, true);
+    const error = new Error('Formato de vídeo inválido. Envie um arquivo WebM.');
+    error.statusCode = 415;
+    callback(error);
+  },
+});
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocket.Server({ server, maxPayload: 64 * 1024 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
 // rooms: { code: { broadcaster: ws, viewers: Map(id -> ws) } }
 const rooms = new Map();
+const MAX_CONCURRENT_CLIPS = 1;
+let activeClipProcesses = 0;
 
 // Manda o link do clipe pro canal do Discord configurado (se houver webhook definido)
 async function notifyDiscord(clipUrl, code) {
@@ -60,35 +79,63 @@ function send(ws, data) {
 
 // ---- Clipes ----
 
+function receiveClip(req, res, next) {
+  upload.single('video')(req, res, (error) => {
+    if (!error) return next();
+
+    if (error instanceof multer.MulterError) {
+      console.warn(`Upload de clipe rejeitado pelo Multer (${error.code}).`);
+      const status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      const message = error.code === 'LIMIT_FILE_SIZE'
+        ? 'O clipe ultrapassou o limite de 100 MB.'
+        : 'Upload de clipe inválido.';
+      return res.status(status).json({ error: message });
+    }
+
+    res.status(error.statusCode || 400).json({ error: error.message || 'Upload de clipe inválido.' });
+  });
+}
+
+async function removeTemporaryFiles(paths) {
+  await Promise.allSettled(paths.filter(Boolean).map((filePath) => unlink(filePath)));
+}
+
 // Recebe o vídeo do clipe (enviado pelo navegador de quem assiste) e sobe pro Cloudinary
-app.post('/api/clips', upload.single('video'), async (req, res) => {
+app.post('/api/clips', receiveClip, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'Nenhum vídeo enviado.' });
   }
-  const code = (req.body.code || 'sem-codigo').toString().trim().toUpperCase().slice(0, 20) || 'sem-codigo';
-  const duration = parseClipDuration(req.body.duration);
-
-  if (!duration) {
-    return res.status(400).json({ error: 'Duração de clipe inválida. Use 30 ou 60 segundos.' });
-  }
-
-  if (!process.env.CLOUDINARY_CLOUD_NAME) {
-    return res.status(500).json({ error: 'Cloudinary não configurado no servidor (variáveis de ambiente ausentes).' });
-  }
+  const temporaryFiles = [req.file.path];
+  let acquiredClipSlot = false;
 
   try {
-    const normalizedClip = await normalizeClip(req.file.buffer, duration);
-    const result = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        {
-          resource_type: 'video',
-          folder: 'clips',
-          tags: ['clipe', code],
-          format: 'mp4',
-        },
-        (error, result) => (error ? reject(error) : resolve(result))
-      );
-      uploadStream.end(normalizedClip);
+    const code = (req.body.code || '').toString().trim().toUpperCase();
+    const duration = parseClipDuration(req.body.duration);
+
+    if (!/^[A-Z0-9]{4}$/.test(code)) {
+      return res.status(400).json({ error: 'Código de sala inválido.' });
+    }
+    if (!duration) {
+      return res.status(400).json({ error: 'Duração de clipe inválida. Use 30 ou 60 segundos.' });
+    }
+    if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+      return res.status(500).json({ error: 'Cloudinary não configurado no servidor (variáveis de ambiente ausentes).' });
+    }
+    if (activeClipProcesses >= MAX_CONCURRENT_CLIPS) {
+      res.set('Retry-After', '10');
+      return res.status(503).json({ error: 'O servidor já está processando outro clipe. Tente novamente em alguns segundos.' });
+    }
+
+    activeClipProcesses += 1;
+    acquiredClipSlot = true;
+
+    const normalizedClipPath = await normalizeClip(req.file.path, duration);
+    temporaryFiles.push(normalizedClipPath);
+    const result = await cloudinary.uploader.upload(normalizedClipPath, {
+      resource_type: 'video',
+      folder: 'clips',
+      tags: ['clipe', code],
+      format: 'mp4',
     });
 
     res.json({ url: result.secure_url, id: result.public_id, createdAt: result.created_at, code });
@@ -97,6 +144,9 @@ app.post('/api/clips', upload.single('video'), async (req, res) => {
   } catch (err) {
     console.error('Erro ao enviar clipe para o Cloudinary:', err);
     res.status(500).json({ error: 'Falha ao salvar o clipe.' });
+  } finally {
+    if (acquiredClipSlot) activeClipProcesses -= 1;
+    await removeTemporaryFiles(temporaryFiles);
   }
 });
 
@@ -133,15 +183,18 @@ wss.on('connection', (ws) => {
   ws.id = Math.random().toString(36).substring(2, 10);
 
   ws.on('message', (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw);
-    } catch (e) {
+    const { message: msg, error } = parseSignalMessage(raw);
+    if (error) {
+      send(ws, { type: 'error', message: error });
       return;
     }
 
     switch (msg.type) {
       case 'create-room': {
+        if (ws.role) {
+          send(ws, { type: 'error', message: 'Esta conexão já pertence a uma sala.' });
+          return;
+        }
         const code = generateCode();
         ws.role = 'broadcaster';
         ws.code = code;
@@ -151,13 +204,22 @@ wss.on('connection', (ws) => {
       }
 
       case 'join-room': {
-        const room = rooms.get(msg.code);
+        if (ws.role) {
+          send(ws, { type: 'error', message: 'Esta conexão já pertence a uma sala.' });
+          return;
+        }
+        const code = typeof msg.code === 'string' ? msg.code.trim().toUpperCase() : '';
+        if (!/^[A-Z0-9]{4}$/.test(code)) {
+          send(ws, { type: 'error', message: 'Código inválido.' });
+          return;
+        }
+        const room = rooms.get(code);
         if (!room) {
           send(ws, { type: 'error', message: 'Código não encontrado.' });
           return;
         }
         ws.role = 'viewer';
-        ws.code = msg.code;
+        ws.code = code;
         room.viewers.set(ws.id, ws);
         send(ws, { type: 'joined', viewerId: ws.id });
         send(room.broadcaster, { type: 'viewer-joined', viewerId: ws.id });
@@ -165,6 +227,7 @@ wss.on('connection', (ws) => {
       }
 
       case 'offer': {
+        if (ws.role !== 'broadcaster' || typeof msg.target !== 'string' || !msg.sdp) return;
         const room = rooms.get(ws.code);
         if (!room) return;
         const viewer = room.viewers.get(msg.target);
@@ -173,6 +236,7 @@ wss.on('connection', (ws) => {
       }
 
       case 'answer': {
+        if (ws.role !== 'viewer' || !msg.sdp) return;
         const room = rooms.get(ws.code);
         if (!room) return;
         send(room.broadcaster, { type: 'answer', sdp: msg.sdp, from: ws.id });
@@ -180,6 +244,7 @@ wss.on('connection', (ws) => {
       }
 
       case 'ice-candidate': {
+        if (!ws.role || !msg.candidate) return;
         const room = rooms.get(ws.code);
         if (!room) return;
         if (ws.role === 'broadcaster') {
@@ -191,6 +256,10 @@ wss.on('connection', (ws) => {
         break;
       }
     }
+  });
+
+  ws.on('error', (error) => {
+    console.warn(`Erro no WebSocket ${ws.id}:`, error.message);
   });
 
   ws.on('close', () => {
@@ -211,6 +280,16 @@ wss.on('connection', (ws) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Servidor rodando em http://localhost:${PORT}`);
+wss.on('error', (error) => {
+  console.error('Erro no servidor WebSocket:', error);
 });
+
+function startServer(port = PORT, callback) {
+  return server.listen(port, callback || (() => {
+    console.log(`Servidor rodando em http://localhost:${port}`);
+  }));
+}
+
+if (require.main === module) startServer();
+
+module.exports = { app, server, startServer, wss };

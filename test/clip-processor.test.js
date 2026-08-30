@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
-const { mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
+const { mkdtemp, rm } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -37,7 +37,7 @@ test('aceita somente as durações expostas pela interface', () => {
 test('recodifica e limita a duração do clipe', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-test-'));
   const sourcePath = path.join(directory, 'source.webm');
-  const outputPath = path.join(directory, 'output.mp4');
+  const outputPath = `${sourcePath}.mp4`;
 
   try {
     await ffmpeg([
@@ -47,8 +47,8 @@ test('recodifica e limita a duração do clipe', async () => {
       '-t', '5', '-c:v', 'libvpx', '-c:a', 'libopus', sourcePath,
     ]);
 
-    const normalized = await normalizeClip(await readFile(sourcePath), 2);
-    await writeFile(outputPath, normalized);
+    const normalizedPath = await normalizeClip(sourcePath, 2);
+    assert.equal(normalizedPath, outputPath);
 
     const duration = await mediaDuration(outputPath);
     assert.ok(duration >= 1.9 && duration <= 2.1, `duração obtida: ${duration}s`);
@@ -60,7 +60,7 @@ test('recodifica e limita a duração do clipe', async () => {
 test('preserva um clipe menor quando ainda não há 30 segundos gravados', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-test-'));
   const sourcePath = path.join(directory, 'source.webm');
-  const outputPath = path.join(directory, 'output.mp4');
+  const outputPath = `${sourcePath}.mp4`;
 
   try {
     await ffmpeg([
@@ -69,8 +69,8 @@ test('preserva um clipe menor quando ainda não há 30 segundos gravados', async
       '-t', '3', '-c:v', 'libvpx', sourcePath,
     ]);
 
-    const normalized = await normalizeClip(await readFile(sourcePath), 30);
-    await writeFile(outputPath, normalized);
+    const normalizedPath = await normalizeClip(sourcePath, 30);
+    assert.equal(normalizedPath, outputPath);
     const duration = await mediaDuration(outputPath);
     assert.ok(duration >= 2.9 && duration <= 3.1, `duração obtida: ${duration}s`);
   } finally {
