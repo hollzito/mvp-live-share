@@ -14,6 +14,7 @@ process.env.CLOUDINARY_API_SECRET = 'test-secret';
 delete process.env.DISCORD_WEBHOOK_URL;
 
 const originalCloudinaryUpload = cloudinary.uploader.upload;
+const originalCloudinaryResourcesByTag = cloudinary.api.resources_by_tag;
 const { server, startServer, wss } = require('../server');
 let baseUrl;
 
@@ -30,6 +31,54 @@ function ffmpeg(args) {
   });
 }
 
+function openSocket() {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(baseUrl.replace(/^http/, 'ws'));
+    socket.once('open', () => resolve(socket));
+    socket.once('error', reject);
+  });
+}
+
+function nextMessage(socket, predicate = () => true) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.off('message', onMessage);
+      reject(new Error('Timeout aguardando mensagem WebSocket.'));
+    }, 2_000);
+    const onMessage = (raw) => {
+      const message = JSON.parse(raw);
+      if (!predicate(message)) return;
+      clearTimeout(timeout);
+      socket.off('message', onMessage);
+      resolve(message);
+    };
+    socket.on('message', onMessage);
+  });
+}
+
+async function createClipSession() {
+  const broadcaster = await openSocket();
+  const roomCreated = nextMessage(broadcaster, (message) => message.type === 'room-created');
+  broadcaster.send(JSON.stringify({ type: 'create-room' }));
+  const { code } = await roomCreated;
+
+  const viewer = await openSocket();
+  const joined = nextMessage(viewer, (message) => message.type === 'joined');
+  viewer.send(JSON.stringify({ type: 'join-room', code }));
+  await joined;
+
+  const clipRequest = nextMessage(broadcaster, (message) => message.type === 'clip-request');
+  const clipAccepted = nextMessage(viewer, (message) => message.type === 'clip-accepted');
+  viewer.send(JSON.stringify({ type: 'clip-request', duration: 30 }));
+
+  return {
+    broadcaster,
+    viewer,
+    request: await clipRequest,
+    accepted: await clipAccepted,
+  };
+}
+
 before(async () => {
   await new Promise((resolve) => startServer(0, resolve));
   const address = server.address();
@@ -38,6 +87,7 @@ before(async () => {
 
 after(async () => {
   cloudinary.uploader.upload = originalCloudinaryUpload;
+  cloudinary.api.resources_by_tag = originalCloudinaryResourcesByTag;
   await new Promise((resolve) => wss.close(() => server.close(resolve)));
 });
 
@@ -68,10 +118,27 @@ test('mantém o servidor ativo depois de receber a mensagem WebSocket null', asy
   assert.match(messages[2].message, /já pertence a uma sala/);
 });
 
+test('serve os recursos otimizados e expõe a saúde do processo', async () => {
+  const [healthResponse, recorderResponse, watchResponse] = await Promise.all([
+    fetch(`${baseUrl}/health`),
+    fetch(`${baseUrl}/clip-recorder.js`),
+    fetch(`${baseUrl}/watch.html`),
+  ]);
+
+  assert.equal(healthResponse.status, 200);
+  assert.equal(recorderResponse.status, 200);
+  assert.equal(watchResponse.status, 200);
+  assert.equal((await healthResponse.json()).status, 'ok');
+  assert.match(await recorderResponse.text(), /class RollingClipRecorder/);
+});
+
 test('processa o upload em disco e remove os arquivos temporários', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mvp-live-share-route-test-'));
   const sourcePath = path.join(directory, 'source.webm');
   let uploadedPath;
+  let broadcaster;
+  let viewer;
+  let clipRequest;
 
   try {
     await ffmpeg([
@@ -90,24 +157,84 @@ test('processa o upload em disco e remove os arquivos temporários', async () =>
       };
     };
 
+    ({ broadcaster, viewer, request: clipRequest } = await createClipSession());
+    const clipResult = nextMessage(viewer, (message) => message.type === 'clip-result');
+
     const formData = new FormData();
     formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip.webm');
     formData.append('videos', new Blob([await readFile(sourcePath)], { type: 'video/webm' }), 'clip-2.webm');
-    formData.append('code', 'AB12');
-    formData.append('duration', '30');
     formData.append('startOffsetMs', '1000');
 
-    const response = await fetch(`${baseUrl}/api/clips`, { method: 'POST', body: formData });
+    const response = await fetch(`${baseUrl}/api/clips`, {
+      method: 'POST',
+      headers: { 'X-Clip-Request': clipRequest.requestId },
+      body: formData,
+    });
     const data = await response.json();
+    const viewerResult = await clipResult;
 
     assert.equal(response.status, 200, JSON.stringify(data));
     assert.equal(data.url, 'https://example.test/clip.mp4');
+    assert.equal(viewerResult.url, data.url);
+    assert.equal(viewerResult.requestId, clipRequest.requestId);
     assert.ok(uploadedPath.endsWith('.webm.mp4'));
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(access(uploadedPath));
     await assert.rejects(access(uploadedPath.slice(0, -4)));
   } finally {
+    broadcaster?.close();
+    viewer?.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('rejeita upload sem solicitação antes de executar o processamento', async () => {
+  const formData = new FormData();
+  formData.append('videos', new Blob(['invalido'], { type: 'video/webm' }), 'clip.webm');
+  formData.append('startOffsetMs', '0');
+
+  const response = await fetch(`${baseUrl}/api/clips`, { method: 'POST', body: formData });
+  assert.equal(response.status, 403);
+});
+
+test('rejeita uma segunda solicitação antes de iniciar outro upload', async () => {
+  const session = await createClipSession();
+  try {
+    const busyResponse = nextMessage(session.viewer, (message) => message.type === 'clip-error');
+    session.viewer.send(JSON.stringify({ type: 'clip-request', duration: 30 }));
+    const message = await busyResponse;
+    assert.match(message.message, /Outro clipe/);
+
+    session.broadcaster.send(JSON.stringify({
+      type: 'clip-upload-failed',
+      requestId: session.request.requestId,
+    }));
+  } finally {
+    session.broadcaster.close();
+    session.viewer.close();
+  }
+});
+
+test('reutiliza o cache da listagem de clipes', async () => {
+  let calls = 0;
+  cloudinary.api.resources_by_tag = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      resources: [{
+        secure_url: 'https://example.test/cached.mp4',
+        tags: ['clipe', 'AB12'],
+        created_at: '2026-08-30T00:00:00Z',
+      }],
+    };
+  };
+
+  const [first, second] = await Promise.all([
+    fetch(`${baseUrl}/api/clips?limit=1`),
+    fetch(`${baseUrl}/api/clips?limit=1`),
+  ]);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(calls, 1);
 });

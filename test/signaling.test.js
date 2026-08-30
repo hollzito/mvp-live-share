@@ -24,4 +24,7 @@ test('aceita apenas tipos de sinalização conhecidos', () => {
   assert.deepEqual(parseSignalMessage(Buffer.from('{"type":"join-room","code":"AB12"}')), {
     message: { type: 'join-room', code: 'AB12' },
   });
+  assert.deepEqual(parseSignalMessage(Buffer.from('{"type":"clip-request","duration":30}')), {
+    message: { type: 'clip-request', duration: 30 },
+  });
 });

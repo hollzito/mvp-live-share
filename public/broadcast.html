@@ -27,6 +27,8 @@
 
   <video id="preview" autoplay muted playsinline></video>
 
+<script src="/clip-buffer.js"></script>
+<script src="/clip-recorder.js"></script>
 <script>
 const startBtn = document.getElementById('startBtn');
 const codeBox = document.getElementById('codeBox');
@@ -36,26 +38,43 @@ const preview = document.getElementById('preview');
 
 let ws;
 let localStream;
+let clipRecorder;
 const peers = new Map(); // viewerId -> RTCPeerConnection
 
 const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+const MAX_VIDEO_BITRATE = 8_000_000;
+
+function sendSignal(message) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  ws.send(JSON.stringify(message));
+  return true;
+}
 
 startBtn.addEventListener('click', async () => {
   try {
-    localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    localStream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        width: { ideal: 1920, max: 1920 },
+        height: { ideal: 1080, max: 1080 },
+        frameRate: { ideal: 30, max: 30 },
+      },
+      audio: true,
+    });
   } catch (err) {
     alert('Não foi possível capturar a tela: ' + err.message);
     return;
   }
 
   preview.srcObject = localStream;
+  const videoTrack = localStream.getVideoTracks()[0];
+  if ('contentHint' in videoTrack) videoTrack.contentHint = 'detail';
   startBtn.disabled = true;
   startBtn.textContent = 'Transmitindo...';
 
   ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'create-room' }));
+    sendSignal({ type: 'create-room' });
   };
 
   ws.onmessage = async (event) => {
@@ -65,6 +84,7 @@ startBtn.addEventListener('click', async () => {
       codeBox.style.display = 'block';
       codeDisplay.textContent = msg.code;
     } else if (msg.type === 'viewer-joined') {
+      ensureClipRecorder();
       await addViewer(msg.viewerId);
     } else if (msg.type === 'answer') {
       const pc = peers.get(msg.from);
@@ -77,31 +97,103 @@ startBtn.addEventListener('click', async () => {
     } else if (msg.type === 'viewer-left') {
       const pc = peers.get(msg.viewerId);
       if (pc) { pc.close(); peers.delete(msg.viewerId); }
+      stopClipRecorderWithoutViewers();
       viewerCountEl.textContent = `Espectadores conectados: ${peers.size}`;
+    } else if (msg.type === 'clip-request') {
+      uploadRequestedClip(msg);
     }
   };
 
   localStream.getVideoTracks()[0].addEventListener('ended', () => {
-    ws.close();
+    clipRecorder?.stop();
+    if (ws?.readyState === WebSocket.OPEN) ws.close();
     location.reload();
   });
 });
+
+function ensureClipRecorder() {
+  if (clipRecorder) return;
+  clipRecorder = new RollingClipRecorder(localStream, {
+    videoBitsPerSecond: MAX_VIDEO_BITRATE,
+  });
+  clipRecorder.start();
+}
+
+function stopClipRecorderWithoutViewers() {
+  if (peers.size > 0 || !clipRecorder) return;
+  clipRecorder.stop();
+  clipRecorder = null;
+}
+
+async function uploadRequestedClip({ requestId, duration }) {
+  if (!clipRecorder) {
+    sendSignal({ type: 'clip-upload-failed', requestId });
+    return;
+  }
+
+  try {
+    const selection = await clipRecorder.select(duration);
+    if (selection.segments.length === 0) throw new Error('Nenhum segmento disponível.');
+
+    const formData = new FormData();
+    selection.segments.forEach((segment, index) => {
+      formData.append('videos', segment.blob, `segmento-${index}.webm`);
+    });
+    formData.append('startOffsetMs', String(Math.round(selection.startOffsetMs)));
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 240_000);
+    try {
+      const response = await fetch('/api/clips', {
+        method: 'POST',
+        headers: { 'X-Clip-Request': requestId },
+        body: formData,
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`Falha ao processar clipe (HTTP ${response.status}).`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    console.error('Erro ao preparar clipe solicitado:', error);
+    sendSignal({ type: 'clip-upload-failed', requestId });
+  }
+}
 
 async function addViewer(viewerId) {
   const pc = new RTCPeerConnection({ iceServers });
   peers.set(viewerId, pc);
 
-  localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+  const senders = localStream.getTracks().map((track) => pc.addTrack(track, localStream));
+  const videoSender = senders.find((sender) => sender.track?.kind === 'video');
+  if (videoSender) {
+    const parameters = videoSender.getParameters();
+    if (!parameters.encodings?.length) parameters.encodings = [{}];
+    parameters.encodings[0].maxBitrate = MAX_VIDEO_BITRATE;
+    parameters.encodings[0].maxFramerate = 30;
+    await videoSender.setParameters(parameters).catch((error) => {
+      console.warn('O navegador não aplicou o limite de bitrate:', error);
+    });
+  }
+
+  pc.addEventListener('connectionstatechange', () => {
+    if (['failed', 'closed'].includes(pc.connectionState)) {
+      pc.close();
+      peers.delete(viewerId);
+      stopClipRecorderWithoutViewers();
+      viewerCountEl.textContent = `Espectadores conectados: ${peers.size}`;
+    }
+  });
 
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      ws.send(JSON.stringify({ type: 'ice-candidate', target: viewerId, candidate: event.candidate }));
+      sendSignal({ type: 'ice-candidate', target: viewerId, candidate: event.candidate });
     }
   };
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  ws.send(JSON.stringify({ type: 'offer', target: viewerId, sdp: offer }));
+  sendSignal({ type: 'offer', target: viewerId, sdp: offer });
 
   viewerCountEl.textContent = `Espectadores conectados: ${peers.size}`;
 }
